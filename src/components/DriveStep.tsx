@@ -173,7 +173,7 @@ export default function DriveStep({ onContinue }: Props) {
             >
               {state === "connecting"
                 ? "Esperando autorización de Google..."
-                : "Buscando documentos médicos..."}
+                : "Salu está leyendo tus archivos..."}
             </p>
           </div>
         )}
