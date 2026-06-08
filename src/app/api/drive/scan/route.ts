@@ -13,6 +13,7 @@ const MEDICAL_MIME_TYPES = [
 
 const MAX_FILES = 30;
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB per file
+const MEDICAL_CONFIDENCE_THRESHOLD = 0.75;
 
 type DriveFile = {
   id: string;
@@ -66,7 +67,7 @@ export async function GET(req: NextRequest) {
 
     // 3. Download each file and classify with Claude
     const classified = await classifyFilesWithClaude(allFiles, accessToken, apiKey);
-    const medical = classified.filter((f) => f.confidence >= 0.5);
+    const medical = classified.filter((f) => f.confidence >= MEDICAL_CONFIDENCE_THRESHOLD);
 
     return NextResponse.json({ files: medical });
   } catch (err: unknown) {
@@ -99,10 +100,10 @@ async function classifySingleFile(
   accessToken: string,
   apiKey: string
 ): Promise<ClassifiedDriveFile> {
+  // When classification fails, fall back to name-based (conservative — won't pass 0.75 threshold unless name is clearly medical)
   const fallback: ClassifiedDriveFile = {
     ...file,
-    label: "Documento médico",
-    confidence: 0.5,
+    ...classifyByName(file.name),
   };
 
   try {
