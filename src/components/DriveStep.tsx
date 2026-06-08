@@ -7,20 +7,20 @@ type Props = {
   onContinue: (files: CollectedFile[]) => void;
 };
 
-type DriveFile = {
-  id: string;
-  name: string;
-  mimeType: string;
-  size?: number;
-};
-
-type State = "idle" | "connecting" | "scanning" | "done" | "error";
+type DriveFolder = { id: string; name: string };
+type DriveFile = { id: string; name: string; mimeType: string; size?: number };
+type Step = "idle" | "connecting" | "loading_folders" | "selecting" | "scanning" | "done" | "error";
 
 export default function DriveStep({ onContinue }: Props) {
-  const [state, setState] = useState<State>("idle");
-  const [found, setFound] = useState<DriveFile[] | null>(null);
+  const [step, setStep] = useState<Step>("idle");
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [folders, setFolders] = useState<DriveFolder[]>([]);
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [found, setFound] = useState<DriveFile[]>([]);
+  const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [scannedTotal, setScannedTotal] = useState(0);
   const scriptLoaded = useRef(false);
 
   useEffect(() => {
@@ -33,68 +33,92 @@ export default function DriveStep({ onContinue }: Props) {
     document.head.appendChild(script);
   }, []);
 
-  function connectAndScan() {
+  function connectDrive() {
     if (!window.google) {
-      setError("El script de Google no cargó. Recargá la página e intentá de nuevo.");
+      setError("Script de Google no cargó. Recargá la página.");
       return;
     }
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId) { setError("Client ID no configurado."); return; }
 
-    setState("connecting");
+    setStep("connecting");
     setError(null);
 
-    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-    if (!clientId) {
-      setError("Client ID de Google no configurado.");
-      setState("error");
-      return;
-    }
-
-    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+    window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: "https://www.googleapis.com/auth/drive.readonly",
       callback: async (response) => {
         if (response.error || !response.access_token) {
           setError("No se pudo conectar con Google Drive.");
-          setState("error");
+          setStep("error");
           return;
         }
-        await scanDrive(response.access_token);
+        setAccessToken(response.access_token);
+        await loadFolders(response.access_token);
       },
-    });
-
-    tokenClient.requestAccessToken();
+    }).requestAccessToken();
   }
 
-  async function scanDrive(accessToken: string) {
-    setState("scanning");
+  async function loadFolders(token: string) {
+    setStep("loading_folders");
     try {
-      const res = await fetch("/api/drive/scan", {
-        headers: { Authorization: `Bearer ${accessToken}` },
+      const res = await fetch("/api/drive/folders", {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error("scan_failed");
-      const { files } = await res.json();
-      setFound(files);
-      setSelected(new Set(files.map((f: DriveFile) => f.id)));
-      setState("done");
+      if (!res.ok) throw new Error();
+      const { folders: f } = await res.json();
+      setFolders(f);
+      setStep("selecting");
     } catch {
-      setError("No se pudo escanear Drive. Intentá de nuevo.");
-      setState("error");
+      setError("No se pudieron cargar las carpetas.");
+      setStep("error");
     }
   }
 
-  function toggleFile(id: string) {
+  async function scanFolders() {
+    if (!accessToken || selected.size === 0) return;
+    setStep("scanning");
+    setError(null);
+    try {
+      const res = await fetch("/api/drive/scan", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ folderIds: Array.from(selected) }),
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setFound(data.files ?? []);
+      setConfirmed(new Set((data.files ?? []).map((f: DriveFile) => f.id)));
+      setScannedTotal(data.total ?? 0);
+      setStep("done");
+    } catch {
+      setError("Error al escanear las carpetas.");
+      setStep("error");
+    }
+  }
+
+  function toggleFolder(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function toggleFile(id: string) {
+    setConfirmed((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
   }
 
   function confirm() {
-    if (!found) return;
     const files: CollectedFile[] = found
-      .filter((f) => selected.has(f.id))
+      .filter((f) => confirmed.has(f.id))
       .map((f) => ({
         name: f.name,
         mimeType: f.mimeType,
@@ -105,21 +129,18 @@ export default function DriveStep({ onContinue }: Props) {
     onContinue(files);
   }
 
+  const filteredFolders = folders.filter((f) =>
+    f.name.toLowerCase().includes(search.toLowerCase())
+  );
+
   return (
     <div className="w-full max-w-lg mt-8 flex flex-col gap-6">
       <div>
-        <h1
-          className="text-2xl font-bold text-[#28347c]"
-          style={{ fontFamily: "var(--font-inter)" }}
-        >
+        <h1 className="text-2xl font-bold text-[#28347c]" style={{ fontFamily: "var(--font-inter)" }}>
           Conectá tu Google Drive
         </h1>
-        <p
-          className="mt-2 text-[#666666] text-sm leading-relaxed"
-          style={{ fontFamily: "var(--font-poppins)" }}
-        >
-          Salutia va a buscar estudios, análisis y documentos médicos en tu
-          Drive. Solo lectura — no modifica nada.
+        <p className="mt-2 text-[#666666] text-sm leading-relaxed" style={{ fontFamily: "var(--font-poppins)" }}>
+          Elegí las carpetas donde tenés tus documentos médicos y Salu los analiza.
         </p>
       </div>
 
@@ -131,65 +152,48 @@ export default function DriveStep({ onContinue }: Props) {
         <div className="flex items-center gap-3">
           <DriveIcon />
           <div>
-            <p
-              className="font-semibold text-[#333333]"
-              style={{ fontFamily: "var(--font-inter)" }}
-            >
+            <p className="font-semibold text-[#333333]" style={{ fontFamily: "var(--font-inter)" }}>
               Google Drive
             </p>
-            <p
-              className="text-xs text-[#666666]"
-              style={{ fontFamily: "var(--font-poppins)" }}
-            >
+            <p className="text-xs text-[#666666]" style={{ fontFamily: "var(--font-poppins)" }}>
               Solo lectura · Sin base de datos · Se borra al recargar
             </p>
           </div>
         </div>
 
-        {/* Idle */}
-        {state === "idle" && (
+        {/* IDLE */}
+        {step === "idle" && (
           <button
-            onClick={connectAndScan}
+            onClick={connectDrive}
             className="w-full py-3 rounded-xl text-white font-semibold text-sm"
-            style={{
-              background: "linear-gradient(50deg, #2b4c9c, #28347c)",
-              fontFamily: "var(--font-inter)",
-            }}
+            style={{ background: "linear-gradient(50deg, #2b4c9c, #28347c)", fontFamily: "var(--font-inter)" }}
           >
-            Conectar y buscar documentos
+            Conectar Google Drive
           </button>
         )}
 
-        {/* Connecting / scanning */}
-        {(state === "connecting" || state === "scanning") && (
+        {/* LOADING STATES */}
+        {(step === "connecting" || step === "loading_folders" || step === "scanning") && (
           <div className="flex flex-col items-center gap-3 py-4">
             <div
-              className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin"
+              className="w-8 h-8 rounded-full border-2 animate-spin"
               style={{ borderColor: "#2b4c9c", borderTopColor: "transparent" }}
             />
-            <p
-              className="text-sm text-[#666666]"
-              style={{ fontFamily: "var(--font-poppins)" }}
-            >
-              {state === "connecting"
-                ? "Esperando autorización de Google..."
-                : "Salu está leyendo tus archivos..."}
+            <p className="text-sm text-[#666666]" style={{ fontFamily: "var(--font-poppins)" }}>
+              {step === "connecting" && "Esperando autorización..."}
+              {step === "loading_folders" && "Cargando carpetas..."}
+              {step === "scanning" && "Salu está leyendo tus archivos..."}
             </p>
           </div>
         )}
 
-        {/* Error */}
-        {state === "error" && (
+        {/* ERROR */}
+        {step === "error" && (
           <div className="flex flex-col gap-3">
-            <p
-              className="text-sm text-red-500"
-              style={{ fontFamily: "var(--font-poppins)" }}
-            >
-              {error}
-            </p>
+            <p className="text-sm text-red-500" style={{ fontFamily: "var(--font-poppins)" }}>{error}</p>
             <button
-              onClick={() => { setState("idle"); setError(null); }}
-              className="w-full py-3 rounded-xl font-semibold text-sm border border-[#2b4c9c] text-[#2b4c9c] bg-white"
+              onClick={() => { setStep("idle"); setError(null); }}
+              className="w-full py-3 rounded-xl font-semibold text-sm border border-[#2b4c9c] text-[#2b4c9c]"
               style={{ fontFamily: "var(--font-inter)" }}
             >
               Intentar de nuevo
@@ -197,81 +201,165 @@ export default function DriveStep({ onContinue }: Props) {
           </div>
         )}
 
-        {/* Results */}
-        {state === "done" && found && (
-          <div className="flex flex-col gap-2">
-            {found.length === 0 ? (
-              <p
-                className="text-sm text-[#666666] text-center py-3"
-                style={{ fontFamily: "var(--font-poppins)" }}
-              >
-                No encontramos documentos médicos en tu Drive.
-              </p>
-            ) : (
-              <>
-                <p
-                  className="text-xs font-semibold text-[#28347c] uppercase tracking-wide"
-                  style={{ fontFamily: "var(--font-inter)" }}
-                >
-                  {found.length} documento{found.length !== 1 ? "s" : ""} encontrado{found.length !== 1 ? "s" : ""}
-                </p>
-                <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
-                  {found.map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => toggleFile(f.id)}
-                      className="flex items-center gap-3 p-3 rounded-xl border transition-all text-left"
-                      style={{
-                        borderColor: selected.has(f.id) ? "#2b4c9c" : "#e8f4fb",
-                        background: selected.has(f.id) ? "#e8f4fb" : "white",
-                      }}
-                    >
-                      <div
-                        className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border-2 transition-all"
-                        style={{
-                          borderColor: selected.has(f.id) ? "#2b4c9c" : "#c0cfe8",
-                          background: selected.has(f.id) ? "#2b4c9c" : "white",
-                        }}
-                      >
-                        {selected.has(f.id) && (
-                          <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-                            <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p
-                          className="text-sm font-medium text-[#333333] truncate"
-                          style={{ fontFamily: "var(--font-poppins)" }}
-                        >
-                          {f.name}
-                        </p>
-                        <p
-                          className="text-xs text-[#666666]"
-                          style={{ fontFamily: "var(--font-poppins)" }}
-                        >
-                          {f.mimeType.includes("pdf") ? "PDF" : f.mimeType.split("/")[1]?.toUpperCase() ?? "Archivo"}
-                          {f.size ? ` · ${(f.size / 1024).toFixed(0)} KB` : ""}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
+        {/* FOLDER SELECTION */}
+        {step === "selecting" && (
+          <div className="flex flex-col gap-3">
+            <p className="text-xs font-semibold text-[#28347c] uppercase tracking-wide" style={{ fontFamily: "var(--font-inter)" }}>
+              {folders.length} carpetas encontradas — elegí las que contienen documentos médicos
+            </p>
 
+            {/* Search */}
+            <div className="relative">
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <circle cx="6" cy="6" r="4.5" stroke="#666666" strokeWidth="1.3" />
+                <path d="M9.5 9.5l2.5 2.5" stroke="#666666" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              <input
+                type="text"
+                placeholder="Buscar carpeta..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full pl-8 pr-3 py-2.5 rounded-xl border border-[#e8f4fb] text-sm outline-none focus:border-[#2b4c9c] transition-colors"
+                style={{ fontFamily: "var(--font-poppins)", color: "#333333" }}
+              />
+            </div>
+
+            {/* Folder list */}
+            <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto pr-1">
+              {filteredFolders.length === 0 && (
+                <p className="text-sm text-[#666666] text-center py-4" style={{ fontFamily: "var(--font-poppins)" }}>
+                  No se encontraron carpetas
+                </p>
+              )}
+              {filteredFolders.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => toggleFolder(f.id)}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition-all"
+                  style={{
+                    borderColor: selected.has(f.id) ? "#2b4c9c" : "#e8f4fb",
+                    background: selected.has(f.id) ? "#e8f4fb" : "white",
+                  }}
+                >
+                  {/* Checkbox */}
+                  <div
+                    className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border-2 transition-all"
+                    style={{
+                      borderColor: selected.has(f.id) ? "#2b4c9c" : "#c0cfe8",
+                      background: selected.has(f.id) ? "#2b4c9c" : "white",
+                    }}
+                  >
+                    {selected.has(f.id) && (
+                      <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                        <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </div>
+                  {/* Folder icon */}
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
+                    <path d="M2 4a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4z"
+                      fill={selected.has(f.id) ? "#2b4c9c" : "#c0cfe8"}
+                      stroke={selected.has(f.id) ? "#2b4c9c" : "#c0cfe8"}
+                      strokeWidth="0.5"
+                    />
+                  </svg>
+                  <span
+                    className="text-sm flex-1 truncate"
+                    style={{
+                      fontFamily: "var(--font-poppins)",
+                      color: selected.has(f.id) ? "#28347c" : "#333333",
+                      fontWeight: selected.has(f.id) ? 600 : 400,
+                    }}
+                  >
+                    {f.name}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Scan button */}
             <button
-              onClick={confirm}
-              className="w-full py-3 rounded-xl text-white font-semibold text-sm mt-1 transition-opacity"
+              onClick={scanFolders}
+              disabled={selected.size === 0}
+              className="w-full py-3 rounded-xl text-white font-semibold text-sm transition-opacity disabled:opacity-40"
               style={{
-                background: selected.size > 0 ? "#ee742f" : "linear-gradient(50deg, #2b4c9c, #28347c)",
+                background: selected.size > 0 ? "linear-gradient(50deg, #2b4c9c, #28347c)" : "#ccc",
                 fontFamily: "var(--font-inter)",
               }}
             >
-              {selected.size > 0
-                ? `Confirmar ${selected.size} documento${selected.size !== 1 ? "s" : ""} →`
-                : "Continuar sin documentos de Drive →"}
+              {selected.size === 0
+                ? "Elegí al menos una carpeta"
+                : `Analizar ${selected.size} carpeta${selected.size !== 1 ? "s" : ""} con Salu`}
             </button>
+          </div>
+        )}
+
+        {/* RESULTS */}
+        {step === "done" && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-semibold text-[#28347c] uppercase tracking-wide" style={{ fontFamily: "var(--font-inter)" }}>
+              {found.length} médico{found.length !== 1 ? "s" : ""} de {scannedTotal} archivo{scannedTotal !== 1 ? "s" : ""} escaneados
+            </p>
+
+            {found.length === 0 ? (
+              <p className="text-sm text-[#666666] text-center py-3" style={{ fontFamily: "var(--font-poppins)" }}>
+                No encontramos documentos médicos en esas carpetas.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto pr-1">
+                {found.map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => toggleFile(f.id)}
+                    className="flex items-center gap-3 p-3 rounded-xl border transition-all text-left"
+                    style={{
+                      borderColor: confirmed.has(f.id) ? "#2b4c9c" : "#e8f4fb",
+                      background: confirmed.has(f.id) ? "#e8f4fb" : "white",
+                    }}
+                  >
+                    <div
+                      className="w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border-2 transition-all"
+                      style={{
+                        borderColor: confirmed.has(f.id) ? "#2b4c9c" : "#c0cfe8",
+                        background: confirmed.has(f.id) ? "#2b4c9c" : "white",
+                      }}
+                    >
+                      {confirmed.has(f.id) && (
+                        <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                          <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-[#333333] truncate" style={{ fontFamily: "var(--font-poppins)" }}>
+                        {f.name}
+                      </p>
+                      <p className="text-xs text-[#666666]" style={{ fontFamily: "var(--font-poppins)" }}>
+                        {f.mimeType.includes("pdf") ? "PDF" : f.mimeType.split("/")[1]?.toUpperCase()}
+                        {f.size ? ` · ${(f.size / 1024).toFixed(0)} KB` : ""}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-2 mt-1">
+              <button
+                onClick={() => setStep("selecting")}
+                className="flex-1 py-3 rounded-xl font-semibold text-sm border border-[#2b4c9c] text-[#2b4c9c] bg-white"
+                style={{ fontFamily: "var(--font-inter)" }}
+              >
+                ← Cambiar carpetas
+              </button>
+              <button
+                onClick={confirm}
+                className="flex-1 py-3 rounded-xl text-white font-semibold text-sm"
+                style={{ background: "#ee742f", fontFamily: "var(--font-inter)" }}
+              >
+                {confirmed.size > 0 ? `Confirmar ${confirmed.size} →` : "Continuar →"}
+              </button>
+            </div>
           </div>
         )}
       </div>

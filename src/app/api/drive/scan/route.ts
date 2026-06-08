@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 
-const MEDICAL_MIME_TYPES = [
+const SCANNABLE_MIME_TYPES = [
   "application/pdf",
   "image/jpeg",
   "image/png",
@@ -11,8 +11,10 @@ const MEDICAL_MIME_TYPES = [
   "image/gif",
 ];
 
-const MAX_FILES = 30;
-const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB per file
+const CLAUDE_SUPPORTED_IMAGES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+const MAX_FILES_PER_FOLDER = 50;
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MEDICAL_CONFIDENCE_THRESHOLD = 0.35;
 
 type DriveFile = {
@@ -27,26 +29,32 @@ type ClassifiedDriveFile = DriveFile & {
   confidence: number;
 };
 
-export async function GET(req: NextRequest) {
+export async function POST(req: NextRequest) {
   const accessToken = req.headers.get("authorization")?.replace("Bearer ", "");
   if (!accessToken) {
     return NextResponse.json({ error: "missing_token" }, { status: 401 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const { folderIds }: { folderIds: string[] } = await req.json();
+  if (!folderIds?.length) {
+    return NextResponse.json({ error: "no_folders" }, { status: 400 });
+  }
 
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   const auth = new google.auth.OAuth2();
   auth.setCredentials({ access_token: accessToken });
   const drive = google.drive({ version: "v3", auth });
 
   try {
-    // 1. List all PDF/image files from Drive
-    const mimeQuery = MEDICAL_MIME_TYPES.map((m) => `mimeType='${m}'`).join(" or ");
+    // Build query: files inside any of the selected folders
+    const parentQuery = folderIds.map((id) => `'${id}' in parents`).join(" or ");
+    const mimeQuery = SCANNABLE_MIME_TYPES.map((m) => `mimeType='${m}'`).join(" or ");
+
     const res = await drive.files.list({
-      q: `(${mimeQuery}) and trashed=false`,
+      q: `(${parentQuery}) and (${mimeQuery}) and trashed=false`,
       fields: "files(id,name,mimeType,size)",
       orderBy: "modifiedTime desc",
-      pageSize: MAX_FILES,
+      pageSize: MAX_FILES_PER_FOLDER * folderIds.length,
     });
 
     const allFiles: DriveFile[] = (res.data.files ?? []).map((f) => ({
@@ -57,80 +65,63 @@ export async function GET(req: NextRequest) {
     }));
 
     if (allFiles.length === 0) {
-      return NextResponse.json({ files: [] });
+      return NextResponse.json({ files: [], total: 0 });
     }
 
-    // 2. If no API key, fall back to name-based heuristic
     if (!apiKey) {
-      return NextResponse.json({ files: allFiles, fallback: true });
+      // No API key — return all files unfiltered so user can review
+      return NextResponse.json({ files: allFiles, fallback: true, total: allFiles.length });
     }
 
-    // 3. Download each file and classify with Claude
-    const classified = await classifyFilesWithClaude(allFiles, accessToken, apiKey);
+    const classified = await classifyWithClaude(allFiles, accessToken, apiKey);
     const medical = classified.filter((f) => f.confidence >= MEDICAL_CONFIDENCE_THRESHOLD);
 
-    return NextResponse.json({ files: medical });
+    return NextResponse.json({ files: medical, total: allFiles.length });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "unknown";
     return NextResponse.json({ error: "scan_failed", detail: message }, { status: 500 });
   }
 }
 
-async function classifyFilesWithClaude(
+async function classifyWithClaude(
   files: DriveFile[],
   accessToken: string,
   apiKey: string
 ): Promise<ClassifiedDriveFile[]> {
-  // Process in parallel with concurrency limit of 5
   const results: ClassifiedDriveFile[] = [];
   const chunks = chunkArray(files, 5);
-
   for (const chunk of chunks) {
     const chunkResults = await Promise.all(
-      chunk.map((f) => classifySingleFile(f, accessToken, apiKey))
+      chunk.map((f) => classifyOne(f, accessToken, apiKey))
     );
     results.push(...chunkResults);
   }
-
   return results;
 }
 
-async function classifySingleFile(
+async function classifyOne(
   file: DriveFile,
   accessToken: string,
   apiKey: string
 ): Promise<ClassifiedDriveFile> {
-  // When classification fails, fall back to name-based (conservative — won't pass 0.75 threshold unless name is clearly medical)
-  const fallback: ClassifiedDriveFile = {
-    ...file,
-    ...classifyByName(file.name),
-  };
+  const nameFallback: ClassifiedDriveFile = { ...file, ...classifyByName(file.name) };
 
   try {
-    // Skip files that are too large
-    if (file.size && file.size > MAX_FILE_BYTES) {
-      return { ...file, ...classifyByName(file.name) };
-    }
+    if (file.size && file.size > MAX_FILE_BYTES) return nameFallback;
 
-    // Download file content from Drive
+    const isPdf = file.mimeType === "application/pdf";
+    const isClaudeImage = CLAUDE_SUPPORTED_IMAGES.includes(file.mimeType);
+
+    if (!isPdf && !isClaudeImage) return nameFallback;
+
     const downloadRes = await fetch(
       `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
-
-    if (!downloadRes.ok) return fallback;
+    if (!downloadRes.ok) return nameFallback;
 
     const buffer = await downloadRes.arrayBuffer();
     const base64 = Buffer.from(buffer).toString("base64");
-
-    // Build Claude content based on MIME type
-    const isPdf = file.mimeType === "application/pdf";
-    const claudeSupportedImage = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(file.mimeType);
-
-    if (!isPdf && !claudeSupportedImage) {
-      // HEIC, TIFF etc — Claude can't read them, fall back to name
-      return fallback;
-    }
 
     type ContentBlock =
       | { type: "text"; text: string }
@@ -144,24 +135,19 @@ async function classifySingleFile(
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: base64 },
       });
-    } else if (claudeSupportedImage) {
-      const mediaType = file.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+    } else {
       contentBlocks.push({
         type: "image",
-        source: { type: "base64", media_type: mediaType, data: base64 },
+        source: { type: "base64", media_type: file.mimeType, data: base64 },
       });
     }
 
     contentBlocks.push({
       type: "text",
-      text: `Analizá este archivo llamado "${file.name}". Determiná si es un documento médico.
+      text: `Analizá este archivo llamado "${file.name}". ¿Es un documento médico?
 
-Respondé SOLO con JSON válido:
-{
-  "is_medical": true/false,
-  "confidence": 0.0-1.0,
-  "label": "Estudio de laboratorio" | "Imagen médica" | "Consulta médica" | "Medicación" | "Vacuna" | "Documento médico" | "No médico"
-}`,
+Respondé SOLO con JSON:
+{"is_medical":true/false,"confidence":0.0-1.0,"label":"Estudio de laboratorio"|"Imagen médica"|"Consulta médica"|"Medicación"|"Vacuna"|"Documento médico"|"No médico"}`,
     });
 
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
@@ -173,20 +159,19 @@ Respondé SOLO con JSON válido:
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 256,
+        max_tokens: 128,
         messages: [{ role: "user", content: contentBlocks }],
       }),
     });
 
-    if (!claudeRes.ok) return fallback;
+    if (!claudeRes.ok) return nameFallback;
 
     const data = await claudeRes.json();
     const text: string = data.content?.[0]?.text ?? "{}";
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return fallback;
+    const jsonMatch = text.match(/\{[\s\S]*?\}/);
+    if (!jsonMatch) return nameFallback;
 
     const parsed = JSON.parse(jsonMatch[0]) as {
-      is_medical: boolean;
       confidence: number;
       label: string;
     };
@@ -197,13 +182,13 @@ Respondé SOLO con JSON válido:
       confidence: parsed.confidence ?? 0.5,
     };
   } catch {
-    return fallback;
+    return nameFallback;
   }
 }
 
 function classifyByName(name: string): { label: string; confidence: number } {
   const n = name.toLowerCase();
-  if (["lab", "analisis", "hemograma", "sangre"].some((k) => n.includes(k)))
+  if (["lab", "analisis", "hemograma", "sangre", "resultado"].some((k) => n.includes(k)))
     return { label: "Estudio de laboratorio", confidence: 0.7 };
   if (["eco", "radio", "resonancia", "tomografia", "rx"].some((k) => n.includes(k)))
     return { label: "Imagen médica", confidence: 0.7 };
@@ -211,15 +196,13 @@ function classifyByName(name: string): { label: string; confidence: number } {
     return { label: "Vacuna", confidence: 0.8 };
   if (["receta", "prescripcion"].some((k) => n.includes(k)))
     return { label: "Medicación", confidence: 0.7 };
-  if (["medico", "clinica", "hospital", "consulta", "resultado", "informe"].some((k) => n.includes(k)))
+  if (["medico", "clinica", "hospital", "consulta", "informe", "estudio"].some((k) => n.includes(k)))
     return { label: "Documento médico", confidence: 0.6 };
   return { label: "Documento médico", confidence: 0.4 };
 }
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
   return chunks;
 }
