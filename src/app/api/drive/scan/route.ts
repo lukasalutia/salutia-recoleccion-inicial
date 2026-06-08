@@ -13,7 +13,7 @@ const MEDICAL_MIME_TYPES = [
 
 const MAX_FILES = 30;
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5MB per file
-const MEDICAL_CONFIDENCE_THRESHOLD = 0.75;
+const MEDICAL_CONFIDENCE_THRESHOLD = 0.35;
 
 type DriveFile = {
   id: string;
@@ -124,10 +124,13 @@ async function classifySingleFile(
     const base64 = Buffer.from(buffer).toString("base64");
 
     // Build Claude content based on MIME type
-    const isImage = file.mimeType.startsWith("image/");
     const isPdf = file.mimeType === "application/pdf";
+    const claudeSupportedImage = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(file.mimeType);
 
-    if (!isImage && !isPdf) return fallback;
+    if (!isPdf && !claudeSupportedImage) {
+      // HEIC, TIFF etc — Claude can't read them, fall back to name
+      return fallback;
+    }
 
     type ContentBlock =
       | { type: "text"; text: string }
@@ -141,7 +144,7 @@ async function classifySingleFile(
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: base64 },
       });
-    } else {
+    } else if (claudeSupportedImage) {
       const mediaType = file.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp";
       contentBlocks.push({
         type: "image",
