@@ -1,8 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
-import { cookies } from "next/headers";
 
-// MIME types likely to contain medical documents
 const MEDICAL_MIME_TYPES = [
   "application/pdf",
   "image/jpeg",
@@ -12,13 +10,12 @@ const MEDICAL_MIME_TYPES = [
   "image/webp",
 ];
 
-// Filename keywords that suggest medical documents
 const MEDICAL_KEYWORDS = [
   "analisis", "análisis", "laboratorio", "lab", "resultado", "estudio",
   "informe", "radiografia", "radiografía", "eco", "resonancia", "tomografia",
   "tomografía", "hemograma", "sangre", "orina", "consulta", "receta",
   "prescripcion", "prescripción", "vacuna", "certificado", "medico", "médico",
-  "clinica", "clínica", "hospital", "diagnostic", "rx ", " rx", "mri",
+  "clinica", "clínica", "hospital", "diagnostic", "rx", "mri",
   "ultrasound", "xray", "x-ray",
 ];
 
@@ -29,25 +26,18 @@ function isMedicalCandidate(name: string, mimeType: string): boolean {
   return hasMedicalKeyword || hasMedicalMime;
 }
 
-export async function GET() {
-  const cookieStore = await cookies();
-  const tokenRaw = cookieStore.get("drive_token")?.value;
+export async function GET(req: NextRequest) {
+  const accessToken = req.headers.get("authorization")?.replace("Bearer ", "");
 
-  if (!tokenRaw) {
-    return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
+  if (!accessToken) {
+    return NextResponse.json({ error: "missing_token" }, { status: 401 });
   }
 
-  const tokens = JSON.parse(tokenRaw);
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  oauth2Client.setCredentials(tokens);
-
-  const drive = google.drive({ version: "v3", auth: oauth2Client });
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token: accessToken });
+  const drive = google.drive({ version: "v3", auth });
 
   try {
-    // Search for likely medical files — no full drive scan, targeted query
     const mimeQuery = MEDICAL_MIME_TYPES.map((m) => `mimeType='${m}'`).join(" or ");
     const res = await drive.files.list({
       q: `(${mimeQuery}) and trashed=false`,
@@ -67,10 +57,7 @@ export async function GET() {
         name: f.name,
         mimeType: f.mimeType,
         size: f.size ? parseInt(f.size) : undefined,
-        modifiedTime: f.modifiedTime,
       })),
-      total: allFiles.length,
-      filtered: candidates.length,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "unknown";
