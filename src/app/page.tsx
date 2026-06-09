@@ -14,6 +14,7 @@ export type CollectedFile = {
   localFile?: File;
   gmailMessageId?: string;
   gmailAttachmentId?: string;
+  gmailSubject?: string;
 };
 
 type Step = "collect" | "results";
