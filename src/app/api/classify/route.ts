@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 type FileInfo = {
   name: string;
   mimeType: string;
+  gmailSubject?: string;
 };
 
 type ClassificationResult = {
@@ -28,9 +29,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ results: [] });
   }
 
-  // Build a single prompt listing all filenames — one API call for N files
+  // Build a single prompt listing all files — one API call for N files
   const fileList = files
-    .map((f, i) => `${i + 1}. "${f.name}" (${f.mimeType})`)
+    .map((f, i) => {
+      const base = `${i + 1}. "${f.name}" (${f.mimeType})`;
+      return f.gmailSubject ? `${base} — asunto del email: "${f.gmailSubject}"` : base;
+    })
     .join("\n");
 
   const prompt = `Sos un clasificador de documentos médicos para una app de salud en Argentina.

@@ -45,7 +45,7 @@ export default function ResultsView({ files, onReset }: Props) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          files: files.map((f) => ({ name: f.name, mimeType: f.mimeType })),
+          files: files.map((f) => ({ name: f.name, mimeType: f.mimeType, gmailSubject: f.gmailSubject })),
         }),
       });
 

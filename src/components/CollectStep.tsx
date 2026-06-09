@@ -229,6 +229,7 @@ export default function CollectStep({ onContinue }: Props) {
         size: a.size,
         gmailMessageId: a.messageId,
         gmailAttachmentId: a.attachmentId,
+        gmailSubject: a.subject,
       }));
 
     onContinue([...fromDrive, ...fromLocal, ...fromPaste, ...fromGmail]);
