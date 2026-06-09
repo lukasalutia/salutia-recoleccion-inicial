@@ -8,10 +8,12 @@ import SaluLogo from "@/components/SaluLogo";
 export type CollectedFile = {
   name: string;
   mimeType: string;
-  source: "drive" | "local";
+  source: "drive" | "local" | "gmail";
   size?: number;
   driveId?: string;
   localFile?: File;
+  gmailMessageId?: string;
+  gmailAttachmentId?: string;
 };
 
 type Step = "collect" | "results";

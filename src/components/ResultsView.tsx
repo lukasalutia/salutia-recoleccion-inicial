@@ -290,7 +290,7 @@ function FileRow({
             {classifying ? "Analizando..." : file.label}
           </span>
           <span className="text-xs text-[#666666]" style={{ fontFamily: "var(--font-poppins)" }}>
-            {file.source === "drive" ? "Drive" : "Local"}
+            {file.source === "drive" ? "Drive" : file.source === "gmail" ? "Gmail" : "Local"}
             {file.size ? ` · ${(file.size / 1024).toFixed(0)} KB` : ""}
           </span>
         </div>
@@ -400,7 +400,7 @@ function PreviewModal({
               className="max-w-full max-h-96 object-contain p-4"
             />
           )}
-          {!previewUrl && (
+          {!previewUrl && file.source === "drive" && (
             <div className="flex flex-col items-center gap-3 p-8 text-center">
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
                 <rect width="48" height="48" rx="12" fill="#e8f4fb" />
@@ -419,6 +419,21 @@ function PreviewModal({
               >
                 Abrir en Drive →
               </a>
+            </div>
+          )}
+          {!previewUrl && file.source === "gmail" && (
+            <div className="flex flex-col items-center gap-3 p-8 text-center">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                <rect width="48" height="48" rx="12" fill="#fce8e6" />
+                <path d="M10 16a2 2 0 0 1 2-2h24a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V16z" fill="white" stroke="#ea4335" strokeWidth="1.5" />
+                <path d="M10 17l14 9 14-9" stroke="#ea4335" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <p className="text-sm text-[#666666]" style={{ fontFamily: "var(--font-poppins)" }}>
+                Adjunto de Gmail
+              </p>
+              <p className="text-xs text-[#999]" style={{ fontFamily: "var(--font-poppins)" }}>
+                Vista previa no disponible — el documento quedará guardado en tu historial.
+              </p>
             </div>
           )}
         </div>
